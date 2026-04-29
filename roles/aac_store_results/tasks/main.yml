@@ -1,0 +1,107 @@
+---
+# aac_store_results/tasks/main.yml
+# Validates required vars, inserts one row into compliance_results,
+# and exposes the new row's ID as aac_result_id.
+
+- name: Resolve derived scoring vars (pass/fail counts)
+  ansible.builtin.set_fact:
+    _aac_failed:    "{{ aac_result_failed_controls | int }}"
+    _aac_passed:    "{{ aac_result_passed_controls | int }}"
+    _aac_pct:       "{{ aac_result_compliance_pct | float | round(2) }}"
+    _aac_framework: >-
+      {{ aac_result_framework
+         if (aac_result_framework | default('') | length > 0)
+         else (aac_result_metadata.framework
+               if (aac_result_metadata is mapping and 'framework' in aac_result_metadata)
+               else 'unknown') }}
+    _aac_hostname: >-
+      {{ aac_result_hostname
+         if (aac_result_hostname | default('') | length > 0)
+         else (aac_result_metadata.hostname
+               if (aac_result_metadata is mapping and 'hostname' in aac_result_metadata)
+               else (inventory_hostname | default(''))) }}
+
+- name: Resolve derived scoring vars (compliant flag)
+  ansible.builtin.set_fact:
+    _aac_compliant: >-
+      {{ (aac_result_metadata.compliant | bool)
+         if (aac_result_metadata is mapping and 'compliant' in aac_result_metadata)
+         else (_aac_failed | int == 0) }}
+
+# ── INSERT — with facts_id FK ─────────────────────────────────────────────────
+- name: Store result (with facts_id)
+  community.postgresql.postgresql_query:
+    login_host:     "{{ aac_result_pg_host }}"
+    login_port:     "{{ aac_result_pg_port }}"
+    login_user:     "{{ aac_result_pg_user }}"
+    login_password: "{{ aac_result_pg_password }}"
+    login_db:             "{{ aac_result_pg_db }}"
+    query: |
+      INSERT INTO compliance_results
+        (facts_id, hostname, framework, policy_name, policy_version,
+         total_controls, passed_controls, failed_controls,
+         compliance_percentage, compliant, violations, metadata)
+      VALUES
+        (%s::bigint, %s, %s, %s, %s,
+         %s::integer, %s::integer, %s::integer,
+         %s::numeric, %s::boolean, %s::jsonb, %s::jsonb)
+      RETURNING id
+    positional_args:
+      - "{{ aac_result_facts_id }}"
+      - "{{ _aac_hostname }}"
+      - "{{ _aac_framework }}"
+      - "{{ aac_result_policy_name }}"
+      - "{{ aac_result_policy_version }}"
+      - "{{ aac_result_total_controls | int }}"
+      - "{{ _aac_passed | int }}"
+      - "{{ _aac_failed | int }}"
+      - "{{ _aac_pct }}"
+      - "{{ _aac_compliant | bool }}"
+      - "{{ aac_result_violations | to_json }}"
+      - "{{ aac_result_metadata | to_json }}"
+  register: _aac_insert_result
+  delegate_to: "{{ aac_result_delegate_to }}"
+  when: aac_result_facts_id is not none and aac_result_facts_id | string | length > 0
+
+# ── INSERT — without facts_id (NULL) ─────────────────────────────────────────
+- name: Store result (no facts_id)
+  community.postgresql.postgresql_query:
+    login_host:     "{{ aac_result_pg_host }}"
+    login_port:     "{{ aac_result_pg_port }}"
+    login_user:     "{{ aac_result_pg_user }}"
+    login_password: "{{ aac_result_pg_password }}"
+    login_db:             "{{ aac_result_pg_db }}"
+    query: |
+      INSERT INTO compliance_results
+        (hostname, framework, policy_name, policy_version,
+         total_controls, passed_controls, failed_controls,
+         compliance_percentage, compliant, violations, metadata)
+      VALUES
+        (%s, %s, %s, %s,
+         %s::integer, %s::integer, %s::integer,
+         %s::numeric, %s::boolean, %s::jsonb, %s::jsonb)
+      RETURNING id
+    positional_args:
+      - "{{ _aac_hostname }}"
+      - "{{ _aac_framework }}"
+      - "{{ aac_result_policy_name }}"
+      - "{{ aac_result_policy_version }}"
+      - "{{ aac_result_total_controls | int }}"
+      - "{{ _aac_passed | int }}"
+      - "{{ _aac_failed | int }}"
+      - "{{ _aac_pct }}"
+      - "{{ _aac_compliant | bool }}"
+      - "{{ aac_result_violations | to_json }}"
+      - "{{ aac_result_metadata | to_json }}"
+  register: _aac_insert_result
+  delegate_to: "{{ aac_result_delegate_to }}"
+  when: aac_result_facts_id is none or aac_result_facts_id | string | length == 0
+
+# ── Expose the new row ID ─────────────────────────────────────────────────────
+- name: Expose result ID
+  ansible.builtin.set_fact:
+    aac_result_id: "{{ _aac_insert_result.query_result[0].id | default(None) }}"
+
+- name: Results stored to PostgreSQL
+  ansible.builtin.debug:
+    msg: "Results stored to PostgreSQL compliance database (row ID: {{ aac_result_id | default('?') }})."

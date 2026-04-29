@@ -1,0 +1,146 @@
+---
+- name: Collect comprehensive system facts
+  ansible.builtin.setup:
+    gather_subset:
+      - all
+      - hardware
+      - network
+      - virtual
+
+- name: Gather partition mount information
+  ansible.builtin.command: findmnt -J
+  register: findmnt_output
+  changed_when: false
+  failed_when: false
+
+- name: Gather modprobe configuration
+  ansible.builtin.shell: |
+    for fs in cramfs squashfs udf; do
+      if grep -q "install $fs /bin/true" /etc/modprobe.d/* 2>/dev/null || \
+          lsmod | grep -q "^$fs"; then
+        echo "$fs:disabled"
+      else
+        echo "$fs:enabled"
+      fi
+    done
+  register: modprobe_check
+  changed_when: false
+  failed_when: false
+
+- name: Check SELinux status
+  ansible.builtin.command: sestatus
+  register: selinux_status
+  changed_when: false
+  failed_when: false
+
+- name: Check firewalld status
+  ansible.builtin.command: firewall-cmd --state
+  register: firewalld_status
+  changed_when: false
+  failed_when: false
+
+- name: Gather SSH configuration
+  ansible.builtin.slurp:
+    src: /etc/ssh/sshd_config
+  register: sshd_config_content
+  failed_when: false
+
+- name: Gather auditd configuration
+  ansible.builtin.slurp:
+    src: /etc/audit/auditd.conf
+  register: auditd_config_content
+  failed_when: false
+
+- name: Build OPA input payload
+  ansible.builtin.set_fact:
+    opa_input:
+      ansible_facts:
+        ansible_hostname: "{{ ansible_hostname }}"
+        ansible_distribution: "{{ ansible_distribution }}"
+        ansible_distribution_version: "{{ ansible_distribution_version }}"
+        ansible_distribution_major_version: "{{ ansible_distribution_major_version }}"
+        ansible_os_family: "{{ ansible_os_family }}"
+        ansible_kernel: "{{ ansible_kernel }}"
+        ansible_architecture: "{{ ansible_architecture }}"
+        ansible_processor_cores: "{{ ansible_processor_cores }}"
+        ansible_memtotal_mb: "{{ ansible_memtotal_mb }}"
+        ansible_mounts: "{{ ansible_mounts }}"
+        ansible_interfaces: "{{ ansible_interfaces | default(['lo']) }}"
+        ansible_default_ipv4: "{{ ansible_default_ipv4 | default({}) }}"
+        ansible_selinux: "{{ ansible_selinux | default({}) }}"
+        ansible_service_mgr: "{{ ansible_service_mgr }}"
+
+- name: Query OPA for compliance violations
+  ansible.builtin.uri:
+    url: "{{ opa_server_url }}/v1/data/{{ policy_package }}/all_violations"
+    method: POST
+    body_format: json
+    body:
+      input: "{{ opa_input }}"
+    return_content: true
+    status_code: 200
+  register: opa_violations_response
+  delegate_to: localhost
+  failed_when: false
+
+- name: Query OPA for compliance status
+  ansible.builtin.uri:
+    url: "{{ opa_server_url }}/v1/data/{{ policy_package }}/compliant"
+    method: POST
+    body_format: json
+    body:
+      input: "{{ opa_input }}"
+    return_content: true
+    status_code: 200
+  register: opa_compliant_response
+  delegate_to: localhost
+  failed_when: false
+
+- name: Query OPA for compliance percentage
+  ansible.builtin.uri:
+    url: "{{ opa_server_url }}/v1/data/{{ policy_package }}/compliance_percentage"
+    method: POST
+    body_format: json
+    body:
+      input: "{{ opa_input }}"
+    return_content: true
+    status_code: 200
+  register: opa_score_response
+  delegate_to: localhost
+  failed_when: false
+
+- name: Parse OPA results
+  ansible.builtin.set_fact:
+    violations: "{{ opa_violations_response.json.result | default([]) }}"
+    is_compliant: "{{ opa_compliant_response.json.result | default(false) }}"
+    total_violations: "{{ (opa_violations_response.json.result | default([])) | length }}"
+
+- name: Calculate compliance metrics
+  ansible.builtin.set_fact:
+    compliance_score: "{{ (((338 - (total_violations | int)) / 338.0) * 100) | round(2) }}"
+    assessment_timestamp: "{{ ansible_date_time.iso8601 }}"
+
+- name: Display compliance summary
+  ansible.builtin.debug:
+    msg: |
+      ========================================
+      CIS RHEL 9 Compliance Assessment Results
+      ========================================
+      Hostname: {{ inventory_hostname }}
+      IP Address: {{ ansible_default_ipv4.address | default('unknown') }}
+
+      System Information:
+        Distribution: {{ ansible_distribution }} {{ ansible_distribution_version }}
+        Kernel: {{ ansible_kernel }}
+        Architecture: {{ ansible_architecture }}
+
+      Compliance Status: {{ 'COMPLIANT' if is_compliant else 'NON-COMPLIANT' }}
+      Total Controls: 338
+      Violations Found: {{ total_violations }}
+      Compliance Score: {{ compliance_score }}%
+      ========================================
+
+- name: List top 10 violations (if any)
+  ansible.builtin.debug:
+    msg: "{{ violations[:10] }}"
+  when: total_violations | int > 0

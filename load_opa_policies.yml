@@ -1,0 +1,7 @@
+---
+- name: Load OPA Policies into Purpose-Specific Containers
+  hosts: localhost
+  gather_facts: false
+
+  roles:
+    - opa_policies

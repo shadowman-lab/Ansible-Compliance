@@ -1,0 +1,81 @@
+---
+- name: Show OPA target URLs
+  ansible.builtin.debug:
+    msg:
+      - "opa-security:   {{ opa_security_url }}"
+      - "opa-compliance: {{ opa_compliance_url }}"
+      - "opa-ot:         {{ opa_ot_url }}"
+
+# -------------------------------------------------------------------------
+# Verify OPA containers are healthy before loading
+# No stop/start needed — OPA accepts PUT /v1/policies/<id> while running.
+# Restarting via SSH from inside an EE container fails because rootless
+# podman containers are tied to the user's XDG_RUNTIME_DIR login session.
+# -------------------------------------------------------------------------
+- name: Verify OPA containers are healthy
+  ansible.builtin.uri:
+    url: "{{ item.url }}/health"
+    status_code: 200
+    timeout: 10
+  loop: "{{ opa_containers }}"
+  loop_control:
+    label: "{{ item.name }}"
+  retries: 6
+  delay: 5
+  register: health_check
+  until: not health_check.failed
+  # status_code: 200 marks the task as failed on non-200, which triggers
+  # the retry. `not health_check.failed` is the correct until condition
+  # when using loop: with loop, .status would only reflect one iteration.
+
+# -------------------------------------------------------------------------
+# Load policies from git checkout
+# -------------------------------------------------------------------------
+- name: Find all policy files per container
+  ansible.builtin.find:
+    paths: "{{ role_path }}/files/rego_policy_libraries/{{ item.1.dir }}"
+    patterns: "*.rego"
+    recurse: true
+  register: policy_files_raw
+  loop: "{{ opa_containers | subelements('frameworks') }}"
+  loop_control:
+    label: "{{ item.0.name }} <- {{ item.1.dir }}"
+  ignore_errors: true
+
+- name: Load each policy file into the appropriate OPA container
+  ansible.builtin.uri:
+    url: "{{ item.0.item.0.url }}/v1/policies/{{ item.0.item.1.prefix }}{{ item.1.path | regex_replace('^.*/' + item.0.item.1.dir + '/', '') | regex_replace('/', '_') | regex_replace('\\.rego$', '') }}"
+    method: PUT
+    body: "{{ lookup('file', item.1.path) }}"
+    body_format: raw
+    headers:
+      Content-Type: "text/plain"
+    status_code: 200
+    timeout: 60
+  loop: "{{ policy_files_raw.results | subelements('files', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item.0.item.0.name }}: {{ item.1.path | basename }}"
+  ignore_errors: true
+  register: load_results
+
+- name: Count policies in each container
+  ansible.builtin.uri:
+    url: "{{ item.url }}/v1/policies"
+    method: GET
+    status_code: 200
+  loop: "{{ opa_containers }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: policy_counts
+
+- name: Print loading summary
+  ansible.builtin.debug:
+    msg: |
+      OPA Policy Loading Complete
+      ===========================
+      {% for result in policy_counts.results %}
+      {{ result.item.name }} ({{ result.item.url }}):
+        Policies loaded: {{ result.json.result | length }}
+      {% endfor %}
+
+      Total errors: {{ load_results.results | selectattr('failed', 'equalto', true) | list | length }}

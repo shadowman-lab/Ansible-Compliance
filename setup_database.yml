@@ -1,0 +1,7 @@
+---
+- name: Setup Database
+  hosts: localhost
+  gather_facts: false
+
+  roles:
+    - database_setup

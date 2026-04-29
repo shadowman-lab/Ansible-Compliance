@@ -1,0 +1,128 @@
+aac_host: "example.host.com"           # On-prem AAP controller (primary deployment)
+# Use this for delegate_to when tasks must write files to the host (SSH connection).
+# The aac_host IP resolves via ansible_connection: local inside EE containers.
+aac_ssh_delegate: "{{ aac_host }}"
+
+# ─── AAP ─────────────────────────────────────────────────────────────────────
+
+# ─── OPA (3 purpose-specific containers) ─────────────────────────────────────
+# opa_host: override this via extra_vars on RHPDS/remote deployments (e.g. opa_host=107.21.112.56)
+# Defaults to aac_host so local deployments need no changes.
+opa_host: "{{ aac_host }}"
+
+opa_security_url:    "http://{{ opa_host }}:8181"    # CIS Benchmarks, NIST, STIGs, OS/Cloud/Container security
+opa_compliance_url:  "http://{{ opa_host }}:8182"    # ISO 27001, SOC 2, PCI-DSS, SOX, FISMA, Sentinel, Corporate
+opa_ot_url:          "http://{{ opa_host }}:8183"    # NERC-CIP, AI Governance, AMI/ICS/OT
+
+# Dict form — for playbooks that need to iterate or look up by name
+opa_endpoints:
+  security:    "http://{{ opa_host }}:8181"
+  compliance:  "http://{{ opa_host }}:8182"
+  ot:          "http://{{ opa_host }}:8183"
+
+# Framework → container mapping — which endpoint handles which framework?
+# Use: opa_framework_map['cis_rhel9'] → 'security' → opa_endpoints['security']
+opa_framework_map:
+  # opa-security (:8181)
+  cis_rhel9:              security
+  cis_rhel8:              security
+  cis_rhel10:             security
+  cis_ubuntu_2204:        security
+  cis_ubuntu_2004:        security
+  cis_ubuntu_2404:        security
+  cis_debian_11:          security
+  cis_rocky_linux_8:      security
+  cis_rocky_linux_9:      security
+  cis_amazon_linux_2023:  security
+  cis_windows_2022:       security
+  cis_windows_2019:       security
+  cis_vyos:               security
+  cis_pfsense:            security
+  cis_docker:             security
+  cis_kubernetes:         security
+  cis_aws:                security
+  cis_azure:              security
+  cis_gcp:                security
+  nist_800_53:            security
+  nist_csf:               security
+  stig_rhel9:             security
+  stig_rhel8:             security
+  stig_windows:           security
+  crypto_miner_detection: security
+  # opa-compliance (:8182)
+  iso27001:               compliance
+  soc2:                   compliance
+  pci_dss:                compliance
+  sox:                    compliance
+  fisma:                  compliance
+  hipaa:                  compliance
+  cmmc:                   compliance
+  fedramp:                compliance
+  gdpr:                   compliance
+  corporate:              compliance
+  sentinel_ansible:       compliance
+  sentinel_terraform:     compliance
+  sentinel_dockerfile:    compliance
+  sentinel_kubernetes:    compliance
+  digital_sovereignty:    compliance
+  ncsc_caf:               compliance
+  dora:                   compliance
+  nis2:                   compliance
+  sec_cyber:              compliance
+  ny_dfs:                 compliance
+  swift_csp:              compliance
+  hitrust:                compliance
+  cfr_part_11:            compliance
+  tisax:                  compliance
+  # opa-ot (:8183)
+  nerc_cip:               ot
+  iec_62443:              ot
+  ami_nist_ir7628:        ot
+  ami_device:             ot
+  ami_headend:            ot
+  ai_governance:          ot
+  nist_ai_rmf:            ot
+  nist_800_82:            ot
+
+
+opa_containers:
+  - name: opa-security
+    url: "{{ opa_security_url }}"
+    frameworks:
+      - { dir: "benchmarks/cis", prefix: "" }
+      - { dir: "benchmarks/stig", prefix: "stig_" }
+      - { dir: "frameworks/federal/nist", prefix: "nist_" }
+
+  - name: opa-compliance
+    url: "{{ opa_compliance_url }}"
+    frameworks:
+      - { dir: "frameworks/management/iso27001", prefix: "iso27001_" }
+      - { dir: "frameworks/management/soc2", prefix: "soc2_" }
+      - { dir: "frameworks/management/corporate", prefix: "corporate_" }
+      - { dir: "frameworks/management/technical_debt", prefix: "technical_debt_" }
+      - { dir: "frameworks/financial/pci_dss", prefix: "pci_dss_" }
+      - { dir: "frameworks/financial/sox", prefix: "sox_" }
+      - { dir: "frameworks/federal/fisma", prefix: "fisma_" }
+      - { dir: "frameworks/federal/fedramp", prefix: "fedramp_" }
+      - { dir: "frameworks/federal/cmmc", prefix: "cmmc_" }
+      - { dir: "frameworks/privacy/gdpr", prefix: "gdpr_" }
+      - { dir: "frameworks/privacy/hipaa", prefix: "hipaa_" }
+      - { dir: "frameworks/compliance/ncsc_caf", prefix: "" }
+      - { dir: "frameworks/sovereignty/digital_sovereignty", prefix: "" }
+      - { dir: "enforcement/ansible", prefix: "sentinel_" }
+      - { dir: "enforcement/terraform", prefix: "sentinel_" }
+      - { dir: "enforcement/dockerfile", prefix: "sentinel_" }
+      - { dir: "enforcement/kubernetes", prefix: "sentinel_" }
+      - { dir: "enforcement/git", prefix: "git_" }
+      - { dir: "governance/mcp", prefix: "" }
+
+  - name: opa-ot
+    url: "{{ opa_ot_url }}"
+    frameworks:
+      - { dir: "frameworks/critical_infrastructure/nerc_cip", prefix: "" }
+      - { dir: "frameworks/critical_infrastructure/iec_62443", prefix: "iec_62443_" }
+      - { dir: "frameworks/critical_infrastructure/ami/nist_ir_7628", prefix: "" }
+      - { dir: "frameworks/critical_infrastructure/ami/device_compliance", prefix: "" }
+      - { dir: "frameworks/critical_infrastructure/ami/headend", prefix: "" }
+      - { dir: "governance/ai", prefix: "ai_governance_" }
+      - { dir: "threat_detection/crypto_mining", prefix: "security_" }

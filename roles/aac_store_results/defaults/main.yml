@@ -1,0 +1,34 @@
+---
+# aac_store_results/defaults/main.yml
+# Single authoritative INSERT for compliance_results.
+# Callers set aac_result_* vars; the role handles the SQL.
+
+# ── Required ──────────────────────────────────────────────────────────────────
+aac_result_policy_name:    ""        # e.g. "CIS RHEL 9"
+aac_result_policy_version: ""        # e.g. "CIS Red Hat Enterprise Linux 9 Benchmark v2.0.0"
+aac_result_total_controls: 0
+
+# ── Violations / scoring ──────────────────────────────────────────────────────
+aac_result_violations:       []      # list of violation dicts or strings
+
+# Derived from violations + total; override if your playbook computes differently
+aac_result_failed_controls:  "{{ aac_result_violations | length }}"
+aac_result_passed_controls:  "{{ [aac_result_total_controls | int - aac_result_failed_controls | int, 0] | max }}"
+aac_result_compliance_pct:   "{{ ((aac_result_passed_controls | int / ([aac_result_total_controls | int, 1] | max)) * 100) | round(2) }}"
+
+# ── Optional fields ───────────────────────────────────────────────────────────
+aac_result_facts_id:          null   # set to a compliance_facts.id FK when available
+aac_result_hostname:          ""     # hostname column (nullable, but set where known)
+aac_result_framework:         ""     # framework NOT NULL — required; falls back to metadata.framework
+aac_result_compliant:         false  # boolean compliant flag
+aac_result_metadata:          {}     # free-form JSONB (hostname, assessment_time, etc.)
+
+# ── DB connection (inherit from site_config vars) ─────────────────────────────
+aac_result_pg_host:     "{{ pg_host }}"
+aac_result_pg_port:     "{{ pg_port | default(5432) }}"
+aac_result_pg_user:     "{{ pg_user | default('postgres') }}"
+aac_result_pg_password: "{{ pg_password | default(compliance_db_password) }}"
+aac_result_pg_db:       "{{ pg_db | default('compliance') }}"
+
+# ── Behaviour ─────────────────────────────────────────────────────────────────
+aac_result_delegate_to: localhost   # where the postgresql_query task runs

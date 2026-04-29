@@ -1,0 +1,4 @@
+---
+aac_db_reader_user: "compliance_reader"
+pg_db: "compliance"
+pg_user: "postgres"
