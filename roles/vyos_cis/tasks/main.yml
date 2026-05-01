@@ -1,31 +1,9 @@
 ---
-- name: Get VyOS configuration JSON
-  vyos.vyos.vyos_config:
-    lines:
-      - show | json
-  register: vyos_config_raw
-  changed_when: false
-  failed_when: false
-
-- name: Get VyOS version
-  vyos.vyos.vyos_command:
-    commands:
-      - show version
-  register: vyos_version_raw
-  changed_when: false
-  failed_when: false
-
-# ── Parse and Build OPA Input ─────────────────────────────────────────────
-
-- name: Parse VyOS configuration JSON
-  ansible.builtin.set_fact:
-    vyos_config: "{{ vyos_config_raw.stdout | from_json if vyos_config_raw.rc | default(1) == 0 and vyos_config_raw.stdout | trim != '' else {} }}"
-
-- name: Extract version string
-  ansible.builtin.set_fact:
-    vyos_version_str: >-
-      {{ (vyos_version_raw.stdout_lines | select('match', '.*VyOS.*') | list | first | default('VyOS unknown'))
-          | regex_replace('Version:\\s+', '') | trim }}
+- name: Grab vyos facts
+  vyos.vyos.vyos_facts:
+    gather_subset: all
+    gather_network_resources: all
+  register: vyosfacts
 
 - name: Build OPA input
   ansible.builtin.set_fact:
@@ -33,12 +11,12 @@
       system:     "{{ vyos_config.system     | default({}) }}"
       service:    "{{ vyos_config.service     | default({}) }}"
       firewall:   "{{ vyos_config.firewall    | default({}) }}"
-      interfaces: "{{ vyos_config.interfaces  | default({}) }}"
+      interfaces: "{{ vyosfacts.ansible_facts.ansible_network_resources.interfaces  | default({}) }}"
       protocols:  "{{ vyos_config.protocols   | default({}) }}"
       policy:     "{{ vyos_config.policy      | default({}) }}"
-      version:    "{{ vyos_version_str }}"
+      version:    "{{ vyosfacts.ansible_facts.ansible_net_version | default('unknown') }}"
       platform:   "vyos"
-      hostname:   "{{ vyos_hostname }}"
+      hostname:   "{{ vyosfacts.ansible_facts.ansible_net_hostname | default('unknown') }}"
 
 # ── OPA Evaluation ─────────────────────────────────────────────────────────
 
