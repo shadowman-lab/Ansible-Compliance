@@ -8,7 +8,7 @@
 - name: Get VyOS configuration JSON
   vyos.vyos.vyos_command:
     commands:
-      - vbash -c 'source /opt/vyatta/etc/functions/script-template && configure && show | json'
+      - /bin/cli-shell-api showConfig --format json
   register: vyos_config_raw
   changed_when: false
   failed_when: false
