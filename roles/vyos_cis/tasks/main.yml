@@ -8,7 +8,7 @@
 - name: Get VyOS configuration JSON
   vyos.vyos.vyos_command:
     commands:
-      - /bin/cli-shell-api showConfig --format json
+      - show configuration
   register: vyos_config_raw
   changed_when: false
   failed_when: false
