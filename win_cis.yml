@@ -3,7 +3,7 @@
 # Collects facts and validates against CIS Windows benchmark
 
 - name: Windows Compliance Assessment
-  hosts: win
+  hosts: all
   gather_facts: true
   become: true
 

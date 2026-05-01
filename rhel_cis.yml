@@ -3,7 +3,7 @@
 # Collects facts and validates against CIS RHEL 9 benchmark
 
 - name: CIS RHEL 9 Compliance Assessment
-  hosts: rhel
+  hosts: all
   gather_facts: false
   become: true
 
