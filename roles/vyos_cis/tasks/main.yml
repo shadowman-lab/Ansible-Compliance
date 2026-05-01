@@ -6,7 +6,7 @@
   register: vyosfacts
 
 - name: Get VyOS configuration JSON
-  vyos.vyos.vyos_commands:
+  vyos.vyos.vyos_command:
     commands:
       - vbash -c 'source /opt/vyatta/etc/functions/script-template && configure && show | json'
   register: vyos_config_raw
