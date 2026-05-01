@@ -1,0 +1,753 @@
+---
+
+- name: Verify Windows Server
+  ansible.builtin.assert:
+    that:
+      - ansible_os_family == "Windows"
+    fail_msg: "This playbook requires Windows. Detected: {{ ansible_os_family }}"
+    success_msg: "Confirmed Windows: {{ ansible_distribution }}"
+
+# ── Account Policies (Section 1 — 11 controls) ────────────────────────────
+
+- name: Collect account policies
+  ansible.windows.win_shell: |
+    $result = @{}
+    try {
+      $tmp = "C:\Windows\Temp\secedit_export.cfg"
+      secedit /export /cfg $tmp /quiet 2>$null
+      $cfg = Get-Content $tmp -ErrorAction Stop
+
+      function Get-SecValue([string]$key) {
+        $line = $cfg | Where-Object { $_ -match "^\s*$key\s*=" }
+        if ($line) { return [int]($line -replace ".*=\s*","").Trim() }
+        return $null
+      }
+
+      $result['password_history_size']       = Get-SecValue 'PasswordHistorySize'
+      $result['maximum_password_age']        = Get-SecValue 'MaximumPasswordAge'
+      $result['minimum_password_age']        = Get-SecValue 'MinimumPasswordAge'
+      $result['minimum_password_length']     = Get-SecValue 'MinimumPasswordLength'
+      $result['password_complexity_enabled'] = (Get-SecValue 'PasswordComplexity') -eq 1
+      $result['store_plaintext_passwords']   = (Get-SecValue 'ClearTextPassword') -eq 1
+      $result['lockout_duration']            = Get-SecValue 'LockoutDuration'
+      $result['lockout_threshold']           = Get-SecValue 'LockoutBadCount'
+      $result['lockout_observation_window']  = Get-SecValue 'ResetLockoutCount'
+
+      Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    } catch {
+      $result['secedit_error'] = $_.Exception.Message
+    }
+
+    # Relax minimum password length (CIS 1.1.6) — registry
+    try {
+      $val = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SAM' `
+        -Name 'RelaxMinimumPasswordLengthLimits' -ErrorAction Stop
+      $result['relax_minimum_password_length'] = $val.RelaxMinimumPasswordLengthLimits -eq 1
+    } catch { $result['relax_minimum_password_length'] = $false }
+
+    # Admin lockout enabled (CIS 1.2.3) — registry
+    try {
+      $val = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' `
+        -Name 'AllowAdministratorLockout' -ErrorAction Stop
+      $result['admin_lockout_enabled'] = $val.AllowAdministratorLockout -eq 1
+    } catch { $result['admin_lockout_enabled'] = $false }
+
+    $result | ConvertTo-Json -Compress
+  register: account_policies_raw
+  failed_when: false
+
+# ── Event Log (Section 18.9.26 — 9 controls) ──────────────────────────────
+
+- name: Collect event log configuration
+  ansible.windows.win_shell: |
+    $result = @{}
+    try {
+      $logPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\EventLog'
+
+      function Get-LogMaxKB([string]$log) {
+        $key = "$logPath\$log"
+        try {
+          $val = (Get-ItemProperty $key -Name MaxSize -ErrorAction Stop).MaxSize
+          return [int]($val / 1024)
+        } catch {
+          try {
+            # Alternative: wevtutil
+            $info = wevtutil gl $log 2>$null | Where-Object { $_ -match 'maxSize:' }
+            if ($info) { return [int](($info -replace '.*:\s*','').Trim()) / 1024 }
+          } catch {}
+          return 0
+        }
+      }
+
+      function Get-LogRetention([string]$log) {
+        $key = "$logPath\$log"
+        try {
+          $ret = (Get-ItemProperty $key -Name Retention -ErrorAction Stop).Retention
+          if ($ret -eq 0) { return "OverwriteAsNeeded" }
+          if ($ret -eq 1) { return "OverwriteOlderThan" }
+          return "Manual"
+        } catch { return "OverwriteAsNeeded" }
+      }
+
+      $result['application_max_size']  = Get-LogMaxKB 'Application'
+      $result['application_retention'] = Get-LogRetention 'Application'
+      $result['security_max_size']     = Get-LogMaxKB 'Security'
+      $result['security_retention']    = Get-LogRetention 'Security'
+      $result['setup_max_size']        = Get-LogMaxKB 'Setup'
+      $result['setup_retention']       = Get-LogRetention 'Setup'
+      $result['system_max_size']       = Get-LogMaxKB 'System'
+      $result['system_retention']      = Get-LogRetention 'System'
+    } catch {
+      $result['eventlog_error'] = $_.Exception.Message
+    }
+
+    # Log service protected (EventLog service cannot be stopped)
+    try {
+      $svc = Get-Service -Name EventLog -ErrorAction Stop
+      $result['log_service_protected'] = ($svc.Status -eq 'Running' -and $svc.StartType -ne 'Disabled')
+    } catch { $result['log_service_protected'] = $false }
+
+    $result | ConvertTo-Json -Compress
+  register: event_log_raw
+  failed_when: false
+
+# ── Advanced Audit Policy (Section 17 — 36 controls) ─────────────────────
+
+- name: Collect advanced audit policy
+  ansible.windows.win_shell: |
+    $result = @{}
+    $output = auditpol /get /category:* 2>&1 | Out-String
+
+    $mapping = @{
+      'Credential Validation'               = 'credential_validation'
+      'Computer Account Management'         = 'computer_account_management'
+      'Other Account Management Events'     = 'other_account_management_events'
+      'Security Group Management'           = 'security_group_management'
+      'User Account Management'             = 'user_account_management'
+      'Process Creation'                    = 'process_creation'
+      'Account Lockout'                     = 'account_lockout'
+      'Group Membership'                    = 'group_membership'
+      'Logoff'                              = 'logoff'
+      'Logon'                               = 'logon'
+      'Other Logon/Logoff Events'           = 'other_logon_logoff'
+      'Special Logon'                       = 'special_logon'
+      'Detailed File Share'                 = 'file_share'
+      'Other Object Access Events'          = 'other_object_access'
+      'Removable Storage'                   = 'removable_storage'
+      'Audit Policy Change'                 = 'audit_policy_change'
+      'Authentication Policy Change'        = 'authentication_policy_change'
+      'MPSSVC Rule-Level Policy Change'     = 'mpssvc_rule_level_policy_change'
+      'Other Policy Change Events'          = 'other_policy_change'
+      'Sensitive Privilege Use'             = 'sensitive_privilege_use'
+      'IPsec Driver'                        = 'ipsec_driver'
+      'Other System Events'                 = 'other_system_events'
+      'Security State Change'               = 'security_state_change'
+      'Security System Extension'           = 'security_system_extension'
+      'System Integrity'                    = 'system_integrity'
+    }
+
+    foreach ($line in ($output -split "`n")) {
+      foreach ($subcategory in $mapping.Keys) {
+        if ($line -match "^\s+$([regex]::Escape($subcategory))\s+(Success and Failure|Success|Failure|No Auditing)\s*$") {
+          $setting = $matches[1].Trim()
+          $key = $mapping[$subcategory]
+          $result["${key}_success"] = ($setting -eq 'Success' -or $setting -eq 'Success and Failure')
+          $result["${key}_failure"] = ($setting -eq 'Failure' -or $setting -eq 'Success and Failure')
+          break
+        }
+      }
+    }
+
+    # Defaults for any missing entries
+    foreach ($key in $mapping.Values) {
+      if (-not $result.ContainsKey("${key}_success")) { $result["${key}_success"] = $false }
+      if (-not $result.ContainsKey("${key}_failure")) { $result["${key}_failure"] = $false }
+    }
+
+    $result | ConvertTo-Json -Compress
+  register: audit_policy_raw
+  failed_when: false
+
+# ── System Services (Section 5 — 26 controls) ─────────────────────────────
+
+- name: Collect system services status
+  ansible.windows.win_shell: |
+    $result = @{}
+    $serviceNames = @(
+      'BTAGService','bthserv','Browser','MapsBroker','lfsvc',
+      'IISADMIN','irmon','SharedAccess','lltdsvc','LxssManager',
+      'FTPSVC','MSiSCSI','sshd','PNRPsvc','p2psvc',
+      'SessionEnv','RpcLocator','RemoteRegistry','RemoteAccess',
+      'simptcp','SNMP','TlntSvr','tftpd','W3SVC','XblAuthManager'
+    )
+
+    foreach ($svcName in $serviceNames) {
+      try {
+        $svc = Get-Service -Name $svcName -ErrorAction Stop
+        $startType = switch ($svc.StartType) {
+          'Automatic' { 'Automatic' }
+          'Manual'    { 'Manual'    }
+          'Disabled'  { 'Disabled'  }
+          default     { $svc.StartType.ToString() }
+        }
+        $result[$svcName] = @{
+          start_type    = $startType
+          state         = $svc.Status.ToString()
+          not_installed = $false
+        }
+      } catch {
+        $result[$svcName] = @{
+          start_type    = 'Disabled'
+          state         = 'Stopped'
+          not_installed = $true
+        }
+      }
+    }
+
+    # SMBv1 check
+    try {
+      $smb = Get-SmbServerConfiguration -ErrorAction Stop
+      $result['smb1_enabled'] = $smb.EnableSMB1Protocol
+    } catch { $result['smb1_enabled'] = $false }
+
+    $result | ConvertTo-Json -Compress
+  register: services_raw
+  failed_when: false
+
+# ── Registry Values (Section 18 — 22 controls) ────────────────────────────
+
+- name: Collect registry values
+  ansible.windows.win_shell: |
+    $result = @{}
+
+    function Get-RegValue([string]$path, [string]$name, $default=$null) {
+      try {
+        return (Get-ItemProperty -Path $path -Name $name -ErrorAction Stop).$name
+      } catch { return $default }
+    }
+
+    # LocalAccountTokenFilterPolicy (CIS 18.3.1) — 0 = UAC restrictions enabled
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'LocalAccountTokenFilterPolicy' 1
+    $result['local_account_token_filter_policy_disabled'] = ($val -eq 0)
+
+    # SMBv1 client (CIS 18.3.3) — Start=4 means disabled
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\MrxSmb10' 'Start' 4
+    $result['smb1_client_enabled'] = ($val -ne 4)
+
+    # SMBv1 server (CIS 18.3.4)
+    try {
+      $smb = Get-SmbServerConfiguration -ErrorAction Stop
+      $result['smb1_server_enabled'] = $smb.EnableSMB1Protocol
+    } catch { $result['smb1_server_enabled'] = $false }
+
+    # SEHOP (CIS 18.3.5) — 0 = enabled
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel' 'DisableExceptionChainValidation' 1
+    $result['sehop_enabled'] = ($val -eq 0)
+
+    # WDigest (CIS 18.3.7) — 0 = disabled
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' 'UseLogonCredential' 0
+    $result['wdigest_enabled'] = ($val -eq 1)
+
+    # AutoAdminLogon (CIS 18.4.1)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'AutoAdminLogon' '0'
+    $result['auto_admin_logon_enabled'] = ($val -eq '1')
+
+    # IPv6 source routing (CIS 18.4.3)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' 'DisableIPSourceRouting' 2
+    $result['ipv6_source_routing_protection'] = [int]$val
+
+    # IPv4 source routing (CIS 18.4.4)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' 'DisableIPSourceRouting' 2
+    $result['ip_source_routing_protection'] = [int]$val
+
+    # ICMP redirect (CIS 18.4.5) — 0 = disabled
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' 'EnableICMPRedirect' 0
+    $result['icmp_redirect_enabled'] = ($val -eq 1)
+
+    # Security log warning level (CIS 18.4.8)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\Eventlog\Security' 'WarningLevel' 90
+    $result['security_log_warning_level'] = [int]$val
+
+    # No NetBIOS name release on demand (CIS 18.4.11)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters' 'NoNameReleaseOnDemand' 1
+    $result['no_name_release_on_demand'] = ($val -eq 1)
+
+    # NetBIOS node type (CIS 18.6.4.1) — should not be 1 (B-node)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters' 'NodeType' 2
+    $result['netbios_node_type'] = [int]$val
+
+    # Insecure guest logons (CIS 18.6.8.1)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LanmanWorkstation' 'AllowInsecureGuestAuth' 0
+    $result['insecure_guest_logons_enabled'] = ($val -eq 1)
+
+    # P2P networking disabled (CIS 18.6.9.1)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Peernet' 'Disabled' 1
+    $result['p2p_networking_disabled'] = ($val -eq 1)
+
+    # LLMNR disabled (CIS 18.6.19.2.1) — EnableMulticast=0 disables it
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'EnableMulticast' 0
+    $result['llmnr_disabled'] = ($val -eq 0)
+
+    # RDP encryption level (CIS 18.8.36.1) — 3 = High
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' 'MinEncryptionLevel' 3
+    $result['rdp_encryption_level'] = [int]$val
+
+    # RDP NLA required (CIS 18.8.36.2)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' 'UserAuthentication' 1
+    $result['rdp_nla_required'] = ($val -eq 1)
+
+    # Allow default credentials (CIS 18.9.17)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CredentialsDelegation' 'AllowDefaultCredentials' 0
+    $result['allow_default_credentials_enabled'] = ($val -eq 1)
+
+    # AutoRun (CIS 18.10.12.1) — 255 = disabled for all
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' 'NoDriveTypeAutoRun' 255
+    $result['autorun_enabled'] = ($val -ne 255)
+
+    # Autoplay disabled (CIS 18.10.12.2) — NoAutorun=1
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' 'NoAutorun' 1
+    $result['autoplay_disabled'] = ($val -eq 1)
+
+    # Error reporting disabled (CIS 18.10.15.1)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting' 'Disabled' 1
+    $result['error_reporting_disabled'] = ($val -eq 1)
+
+    # Device install restriction (CIS 18.10.57.1)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions' 'DenyDeviceIDs' 1
+    $result['device_install_restriction_enabled'] = ($val -eq 1)
+
+    $result | ConvertTo-Json -Compress
+  register: registry_raw
+  failed_when: false
+
+# ── Security Options (Section 2.3 — 22 controls) ──────────────────────────
+
+- name: Collect security options
+  ansible.windows.win_shell: |
+    $result = @{}
+
+    function Get-RegValue([string]$path, [string]$name, $default=$null) {
+      try { return (Get-ItemProperty -Path $path -Name $name -ErrorAction Stop).$name }
+      catch { return $default }
+    }
+
+    # Account status checks
+    try {
+      $adminAcct = Get-LocalUser -Name 'Administrator' -ErrorAction Stop
+      $result['administrator_account_enabled'] = $adminAcct.Enabled
+      $result['administrator_account_name']    = 'Administrator'
+    } catch {
+      $result['administrator_account_enabled'] = $false
+      $result['administrator_account_name']    = 'Administrator'
+    }
+
+    try {
+      $guestAcct = Get-LocalUser -Name 'Guest' -ErrorAction Stop
+      $result['guest_account_enabled'] = $guestAcct.Enabled
+      $result['guest_account_name']    = 'Guest'
+    } catch {
+      $result['guest_account_enabled'] = $false
+      $result['guest_account_name']    = 'Guest'
+    }
+
+    # Renamed accounts: check SID endings
+    try {
+      $adminSid = (Get-LocalUser | Where-Object { $_.SID -like '*-500' } | Select-Object -First 1)
+      if ($adminSid) { $result['administrator_account_name'] = $adminSid.Name }
+    } catch {}
+
+    try {
+      $guestSid = (Get-LocalUser | Where-Object { $_.SID -like '*-501' } | Select-Object -First 1)
+      if ($guestSid) { $result['guest_account_name'] = $guestSid.Name }
+    } catch {}
+
+    # Block Microsoft accounts (CIS 2.3.1.2)
+    # 0 = allowed, 1 = cannot add MS accounts, 3 = cannot add or log on with MS accounts
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'NoConnectedUser' 0
+    $result['microsoft_accounts_allowed'] = ($val -ne 3)
+
+    # Limit blank password use (CIS 2.3.1.4)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'LimitBlankPasswordUse' 1
+    $result['limit_blank_password_use'] = ($val -eq 1)
+
+    # Do not require CTRL+ALT+DEL (CIS 2.3.7.1) — 0 = require (compliant)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'DisableCAD' 0
+    $result['no_ctrl_alt_del_required'] = ($val -eq 1)
+
+    # Don't display last username (CIS 2.3.7.2) — 1 = don't display (compliant)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'DontDisplayLastUserName' 1
+    $result['dont_display_last_username'] = ($val -eq 1)
+
+    # Machine inactivity limit (CIS 2.3.7.4)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'InactivityTimeoutSecs' 0
+    $result['machine_inactivity_limit'] = [int]$val
+
+    # Password expiry warning days (CIS 2.3.7.7)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'PasswordExpiryWarning' 5
+    $result['password_expiry_warning_days'] = [int]$val
+
+    # Allow Local System null session (CIS 2.3.11.1)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'UseMachineId' 1
+    $result['allow_local_system_null_session'] = ($val -eq 1)
+
+    # LAN Manager auth level (CIS 2.3.11.5)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'LmCompatibilityLevel' 0
+    $result['lan_manager_auth_level'] = [int]$val
+
+    # LDAP client signing (CIS 2.3.11.6)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\ldap' 'LDAPClientIntegrity' 1
+    $result['ldap_client_signing'] = [int]$val
+
+    # NTLM minimum session security — client (CIS 2.3.11.7)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0' 'NTLMMinClientSec' 0
+    $result['ntlm_min_session_security_client'] = [int]$val
+
+    # NTLM minimum session security — server (CIS 2.3.11.8)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0' 'NTLMMinServerSec' 0
+    $result['ntlm_min_session_security_server'] = [int]$val
+
+    # Case insensitive subsystems (CIS 2.3.15.1)
+    $val = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Kernel' 'ObCaseInsensitive' 1
+    $result['case_insensitive_subsystems'] = ($val -eq 1)
+
+    # UAC Admin Approval Mode for built-in Administrator (CIS 2.3.17.1)
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'FilterAdministratorToken' 1
+    $result['uac_admin_approval_mode'] = ($val -eq 1)
+
+    # UAC elevation behavior for admins (CIS 2.3.17.2) — 2 = prompt for consent on secure desktop
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'ConsentPromptBehaviorAdmin' 5
+    $result['uac_admin_elevation_behavior'] = [int]$val
+
+    # UAC elevation behavior for standard users (CIS 2.3.17.3) — 0 = auto deny
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'ConsentPromptBehaviorUser' 3
+    $result['uac_standard_elevation_behavior'] = [int]$val
+
+    # UAC detect app installations (CIS 2.3.17.4) — 1 = prompt
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'EnableInstallerDetection' 1
+    $result['uac_detect_installations'] = ($val -eq 1)
+
+    # UAC run all admins in Approval Mode (CIS 2.3.17.8) — 1 = enabled
+    $val = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'EnableLUA' 1
+    $result['uac_run_admins_in_approval_mode'] = ($val -eq 1)
+
+    $result | ConvertTo-Json -Compress
+  register: security_options_raw
+  failed_when: false
+
+# ── Local Policies / User Rights (Section 2.2 — 20 controls) ─────────────
+
+- name: Collect local policies and user rights
+  ansible.windows.win_shell: |
+    $result = @{}
+
+    $tmp = "C:\Windows\Temp\secedit_rights.cfg"
+    secedit /export /cfg $tmp /areas USER_RIGHTS /quiet 2>$null
+    $cfg = Get-Content $tmp -ErrorAction SilentlyContinue
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+
+    function Get-RightSIDs([string]$right) {
+      $line = $cfg | Where-Object { $_ -match "^\s*$right\s*=" }
+      if (-not $line) { return @() }
+      $raw = ($line -replace ".*=\s*","").Trim()
+      if ($raw -eq '') { return @() }
+      return @($raw -split ',')
+    }
+
+    function ContainsSID([string[]]$sids, [string]$sidSuffix) {
+      foreach ($s in $sids) { if ($s.Trim() -like "*$sidSuffix") { return $true } }
+      return $false
+    }
+
+    # SID constants
+    $ADMINS   = '-544'   # BUILTIN\Administrators
+    $AUTH_USR = '-11'    # NT AUTHORITY\Authenticated Users (S-1-5-11)
+    $GUESTS   = '-546'   # BUILTIN\Guests
+    $RDP_USR  = '-555'   # BUILTIN\Remote Desktop Users
+
+    # CIS 2.2.1: Access Credential Manager = No One
+    $sids = Get-RightSIDs 'SeTrustedCredManAccessPrivilege'
+    $result['access_credential_manager'] = $sids
+
+    # CIS 2.2.2: Access from network includes Authenticated Users
+    $sids = Get-RightSIDs 'SeNetworkLogonRight'
+    $result['network_access_includes_authenticated_users'] = (ContainsSID $sids $AUTH_USR)
+
+    # CIS 2.2.5: Local logon restricted to Admins
+    $sids = Get-RightSIDs 'SeInteractiveLogonRight'
+    $nonAdmin = $sids | Where-Object { $_.Trim() -ne '' -and -not ($_ -like "*$ADMINS") }
+    $result['local_logon_restricted'] = ($nonAdmin.Count -eq 0)
+
+    # CIS 2.2.6: RDP logon restricted to Admins + RDP Users
+    $sids = Get-RightSIDs 'SeRemoteInteractiveLogonRight'
+    $nonAllowed = $sids | Where-Object {
+      $s = $_.Trim()
+      $s -ne '' -and -not ($s -like "*$ADMINS") -and -not ($s -like "*$RDP_USR")
+    }
+    $result['rdp_logon_restricted'] = ($nonAllowed.Count -eq 0)
+
+    # CIS 2.2.7: Backup files restricted
+    $sids = Get-RightSIDs 'SeBackupPrivilege'
+    $nonAdmin = $sids | Where-Object { $_.Trim() -ne '' -and -not ($_ -like "*$ADMINS") }
+    $result['backup_files_restricted'] = ($nonAdmin.Count -eq 0)
+
+    # CIS 2.2.11: Create symlinks restricted
+    $sids = Get-RightSIDs 'SeCreateSymbolicLinkPrivilege'
+    $nonAdmin = $sids | Where-Object { $_.Trim() -ne '' -and -not ($_ -like "*$ADMINS") }
+    $result['create_symlinks_restricted'] = ($nonAdmin.Count -eq 0)
+
+    # CIS 2.2.13: Debug programs restricted
+    $sids = Get-RightSIDs 'SeDebugPrivilege'
+    $nonAdmin = $sids | Where-Object { $_.Trim() -ne '' -and -not ($_ -like "*$ADMINS") }
+    $result['debug_programs_restricted'] = ($nonAdmin.Count -eq 0)
+
+    # CIS 2.2.14: Deny network access includes Guests
+    $sids = Get-RightSIDs 'SeDenyNetworkLogonRight'
+    $result['deny_network_access_includes_guests'] = (ContainsSID $sids $GUESTS)
+
+    # CIS 2.2.15: Deny batch logon includes Guests
+    $sids = Get-RightSIDs 'SeDenyBatchLogonRight'
+    $result['deny_batch_logon_includes_guests'] = (ContainsSID $sids $GUESTS)
+
+    # CIS 2.2.16: Deny service logon includes Guests
+    $sids = Get-RightSIDs 'SeDenyServiceLogonRight'
+    $result['deny_service_logon_includes_guests'] = (ContainsSID $sids $GUESTS)
+
+    # CIS 2.2.17: Deny local logon includes Guests
+    $sids = Get-RightSIDs 'SeDenyInteractiveLogonRight'
+    $result['deny_local_logon_includes_guests'] = (ContainsSID $sids $GUESTS)
+
+    # CIS 2.2.18: Deny RDP logon includes Guests
+    $sids = Get-RightSIDs 'SeDenyRemoteInteractiveLogonRight'
+    $result['deny_rdp_logon_includes_guests'] = (ContainsSID $sids $GUESTS)
+
+    # CIS 2.2.19: Trusted for delegation = No One (member server)
+    $result['is_member_server'] = $true
+    $sids = Get-RightSIDs 'SeEnableDelegationPrivilege'
+    $nonEmpty = $sids | Where-Object { $_.Trim() -ne '' }
+    $result['trusted_for_delegation'] = $nonEmpty
+
+    # CIS 2.2.21: Remote shutdown restricted
+    $sids = Get-RightSIDs 'SeRemoteShutdownPrivilege'
+    $nonAdmin = $sids | Where-Object { $_.Trim() -ne '' -and -not ($_ -like "*$ADMINS") }
+    $result['remote_shutdown_restricted'] = ($nonAdmin.Count -eq 0)
+
+    # CIS 2.2.26: Manage audit log restricted
+    $sids = Get-RightSIDs 'SeSecurityPrivilege'
+    $nonAdmin = $sids | Where-Object { $_.Trim() -ne '' -and -not ($_ -like "*$ADMINS") }
+    $result['manage_audit_log_restricted'] = ($nonAdmin.Count -eq 0)
+
+    # CIS 2.2.32: Restore files restricted
+    $sids = Get-RightSIDs 'SeRestorePrivilege'
+    $nonAdmin = $sids | Where-Object { $_.Trim() -ne '' -and -not ($_ -like "*$ADMINS") }
+    $result['restore_files_restricted'] = ($nonAdmin.Count -eq 0)
+
+    # CIS 2.2.33: Shutdown restricted
+    $sids = Get-RightSIDs 'SeShutdownPrivilege'
+    $nonAdmin = $sids | Where-Object { $_.Trim() -ne '' -and -not ($_ -like "*$ADMINS") }
+    $result['shutdown_restricted'] = ($nonAdmin.Count -eq 0)
+
+    # CIS 2.2.35: Take ownership restricted
+    $sids = Get-RightSIDs 'SeTakeOwnershipPrivilege'
+    $nonAdmin = $sids | Where-Object { $_.Trim() -ne '' -and -not ($_ -like "*$ADMINS") }
+    $result['take_ownership_restricted'] = ($nonAdmin.Count -eq 0)
+
+    # CIS 2.3.2.1: Force audit subcategory settings
+    try {
+      $val = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' `
+        -Name 'SCENoApplyLegacyAuditPolicy' -ErrorAction Stop).SCENoApplyLegacyAuditPolicy
+      $result['audit_force_subcategory_settings'] = ($val -eq 1)
+    } catch { $result['audit_force_subcategory_settings'] = $false }
+
+    # CIS 2.3.2.2: Shutdown if unable to log security audits
+    try {
+      $val = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' `
+        -Name 'CrashOnAuditFail' -ErrorAction Stop).CrashOnAuditFail
+      $result['audit_shutdown_if_unable_to_log'] = ($val -ge 1)
+    } catch { $result['audit_shutdown_if_unable_to_log'] = $false }
+
+    $result | ConvertTo-Json -Compress
+  register: local_policies_raw
+  failed_when: false
+
+# ── Windows Defender (Section 18.10 — 18 controls) ────────────────────────
+
+- name: Collect Windows Defender status
+  ansible.windows.win_shell: |
+    $result = @{}
+    try {
+      $status = Get-MpComputerStatus -ErrorAction Stop
+      $pref   = Get-MpPreference -ErrorAction Stop
+
+      $result['antivirus_enabled']          = $status.AntivirusEnabled
+      $result['realtime_protection_enabled']= $status.RealTimeProtectionEnabled
+      $result['behavior_monitoring_enabled']= $status.BehaviorMonitoringEnabled
+      $result['scan_downloads_enabled']     = $status.OnAccessProtectionEnabled
+      $result['file_activity_monitoring_enabled'] = $status.RealTimeProtectionEnabled
+
+      $sigAge = ((Get-Date) - $status.AntivirusSignatureLastUpdated).TotalDays
+      $result['signature_age_days']         = [Math]::Round($sigAge, 1)
+      $result['signature_update_interval']  = [int]$pref.SignatureUpdateInterval
+
+      $result['cloud_protection_enabled']   = ($status.AMRunningMode -ne 'Not running') -and ($pref.MAPSReporting -ne 0)
+      $result['block_at_first_sight_enabled'] = ($pref.DisableBlockAtFirstSeen -eq $false -or $pref.DisableBlockAtFirstSeen -eq $null)
+
+      # ASR rules
+      $asrRules = $pref.AttackSurfaceReductionRules_Ids
+      $result['asr_enabled']    = ($asrRules -ne $null -and $asrRules.Count -gt 0)
+      $result['asr_rules_count']= if ($asrRules) { $asrRules.Count } else { 0 }
+
+      # Controlled Folder Access
+      $result['controlled_folder_access_enabled'] = ($pref.EnableControlledFolderAccess -eq 1)
+
+      # Network Protection
+      $np = $pref.EnableNetworkProtection
+      $result['network_protection_mode'] = switch ($np) {
+        0 { 'Disabled' }
+        1 { 'Block' }
+        2 { 'AuditMode' }
+        default { 'Disabled' }
+      }
+
+    } catch {
+      $result['error'] = $_.Exception.Message
+      $result['antivirus_enabled'] = $false
+    }
+
+    # Firewall profiles
+    try {
+      $profiles = Get-NetFirewallProfile -ErrorAction Stop
+      foreach ($p in $profiles) {
+        $key = $p.Name.ToLower()
+        $result["firewall_${key}_enabled"] = $p.Enabled
+        $result["firewall_${key}_inbound_default"] = $p.DefaultInboundAction.ToString()
+      }
+    } catch {
+      $result['firewall_domain_enabled']  = $false
+      $result['firewall_private_enabled'] = $false
+      $result['firewall_public_enabled']  = $false
+    }
+
+    $result | ConvertTo-Json -Compress
+  register: windows_defender_raw
+  failed_when: false
+
+# ── BitLocker (Section 18.10 — 13 controls) ───────────────────────────────
+
+- name: Collect BitLocker status
+  ansible.windows.win_shell: |
+    $result = @{}
+
+    function Get-RegValue([string]$path, [string]$name, $default=$null) {
+      try { return (Get-ItemProperty -Path $path -Name $name -ErrorAction Stop).$name }
+      catch { return $default }
+    }
+
+    # OS Drive — check registry for BitLocker OS drive policies
+    $osPath = 'HKLM:\SOFTWARE\Policies\Microsoft\FVE'
+
+    $val = Get-RegValue $osPath 'UseAdvancedStartup' 0
+    $result['require_additional_auth_at_startup'] = ($val -eq 1)
+
+    $val = Get-RegValue $osPath 'EnableBDEWithNoTPM' 0
+    $result['allow_without_tpm'] = ($val -eq 1)
+
+    $val = Get-RegValue $osPath 'UseTPMPIN' 0
+    $result['tpm_startup_pin'] = ($val -ge 1)
+
+    $val = Get-RegValue $osPath 'MinimumPIN' 6
+    $result['minimum_pin_length'] = [int]$val
+
+    # OS drive encryption status
+    try {
+      $osVol = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
+      $result['os_drive_encrypted'] = ($osVol.ProtectionStatus -eq 'On')
+      $result['os_encryption_method'] = $osVol.EncryptionMethod.ToString()
+    } catch {
+      $result['os_drive_encrypted']    = $false
+      $result['os_encryption_method']  = 'None'
+    }
+
+    # OS recovery to AD
+    $val = Get-RegValue $osPath 'OSActiveDirectoryBackup' 0
+    $result['os_recovery_to_ad'] = ($val -eq 1)
+
+    # Fixed drives (only checked if require_bitlocker_on_fixed_drives = true)
+    $result['require_bitlocker_on_fixed_drives'] = $false
+
+    # Removable drives
+    $val = Get-RegValue $osPath 'RDVDenyWriteAccess' 0
+    $result['deny_removable_write_without_encryption'] = ($val -eq 1)
+
+    $val = Get-RegValue $osPath 'RDVDenyCrossOrg' 0
+    $result['deny_cross_org_removable_drives'] = ($val -eq 1)
+
+    $result | ConvertTo-Json -Compress
+  register: bitlocker_raw
+  failed_when: false
+
+# ── Build OPA Input Payload ────────────────────────────────────────────────
+
+- name: Parse collected data
+  ansible.builtin.set_fact:
+    _account_policies:  "{{ account_policies_raw.stdout  | from_json if account_policies_raw.rc  | default(1) == 0 else {} }}"
+    _event_log:         "{{ event_log_raw.stdout         | from_json if event_log_raw.rc         | default(1) == 0 else {} }}"
+    _audit_policy:      "{{ audit_policy_raw.stdout      | from_json if audit_policy_raw.rc      | default(1) == 0 else {} }}"
+    _services:          "{{ services_raw.stdout          | from_json if services_raw.rc          | default(1) == 0 else {} }}"
+    _registry:          "{{ registry_raw.stdout          | from_json if registry_raw.rc          | default(1) == 0 else {} }}"
+    _security_options:  "{{ security_options_raw.stdout  | from_json if security_options_raw.rc  | default(1) == 0 else {} }}"
+    _local_policies:    "{{ local_policies_raw.stdout    | from_json if local_policies_raw.rc    | default(1) == 0 else {} }}"
+    _windows_defender:  "{{ windows_defender_raw.stdout  | from_json if windows_defender_raw.rc  | default(1) == 0 else {} }}"
+    _bitlocker:         "{{ bitlocker_raw.stdout         | from_json if bitlocker_raw.rc         | default(1) == 0 else {} }}"
+
+- name: Build OPA input payload
+  ansible.builtin.set_fact:
+    opa_input:
+      account_policies: "{{ _account_policies }}"
+      event_log:        "{{ _event_log }}"
+      audit_policy:     "{{ _audit_policy }}"
+      services:         "{{ _services }}"
+      registry:         "{{ _registry }}"
+      security_options: "{{ _security_options }}"
+      local_policies:   "{{ _local_policies }}"
+      windows_defender: "{{ _windows_defender }}"
+      bitlocker:        "{{ _bitlocker }}"
+
+# ── OPA Evaluation ─────────────────────────────────────────────────────────
+
+- name: Query OPA — CIS Windows Server 2022
+  ansible.builtin.uri:
+    url: "{{ opa_server_url }}/v1/data/cis_windows_server_2022/compliance_assessment"
+    method: POST
+    body_format: json
+    body:
+      input: "{{ opa_input }}"
+    return_content: true
+    status_code: 200
+    validate_certs: false
+  register: opa_response
+  delegate_to: localhost
+  failed_when: false
+
+- name: Parse OPA response
+  ansible.builtin.set_fact:
+    compliance_result: "{{ opa_response.json.result if (opa_response.status | default(0)) == 200 else {} }}"
+
+- name: Normalize violations to list of dicts
+  ansible.builtin.set_fact:
+    cis_violations: >-
+      {%- set viols = [] -%}
+      {%- for v in (compliance_result.violations | default([])) -%}
+        {%- if v is mapping -%}
+          {%- set _ = viols.append(v) -%}
+        {%- else -%}
+          {%- set _ = viols.append({'message': v | string, 'severity': 'high', 'control_id': ''}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ viols }}
+
+# Control-based compliance: (177 - violations) / 177 * 100
+- name: Calculate control-based compliance percentage
+  ansible.builtin.set_fact:
+    violation_count:      "{{ cis_violations | length }}"
+    compliance_score_pct: "{{ [((cis_total_controls - (cis_violations | length)) / cis_total_controls * 100) | round(2), 0] | max }}"
+    passed_controls:      "{{ cis_total_controls - (cis_violations | length) }}"
