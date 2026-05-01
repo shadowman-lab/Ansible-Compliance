@@ -9,8 +9,8 @@
 
 - name: Get VyOS version
   vyos.vyos.vyos_command:
-  commands:
-    - show version
+    commands:
+      - show version
   register: vyos_version_raw
   changed_when: false
   failed_when: false
