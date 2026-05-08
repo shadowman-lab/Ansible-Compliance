@@ -7,6 +7,11 @@
 
 #Need to add registry.redhat.io login for podman
 
+- name: Create a Podman volume
+  containers.podman.podman_volume:
+    name: compliance_pgdata
+    state: present
+
 - name: Open Firewalld for OPA OT
   ansible.posix.firewalld:
     port: 8181/tcp
