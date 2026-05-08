@@ -1,0 +1,76 @@
+---
+- name: Ensure podman, podman plugins are installed
+  ansible.builtin.dnf:
+    name:
+      - podman
+    state: present
+
+#Need to add registry.redhat.io login for podman
+
+- name: Open Firewalld for OPA OT
+  ansible.posix.firewalld:
+    port: 8181/tcp
+    permanent: true
+    state: enabled
+
+- name: Open Firewalld for OPA Compliance
+  ansible.posix.firewalld:
+    port: 8182/tcp
+    permanent: true
+    state: enabled
+
+- name: Open Firewalld for OPA Security
+  ansible.posix.firewalld:
+    port: 8183/tcp
+    permanent: true
+    state: enabled
+
+- name: Open Firewalld for PostgreSQL
+  ansible.posix.firewalld:
+    port: 5432/tcp
+    permanent: true
+    state: enabled
+
+- name: Restart Firewalld
+  ansible.builtin.service:
+    name: firewalld
+    state: restarted
+
+- name: Deploy container systemd unit files for OPA
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - "container-opa-ot.service"
+    - "container-opa-compliance.service"
+    - "container-opa-security.service"
+    - "container-postgres.service"
+  register: systemd_units_deployed
+
+- name: Deploy container systemd unit files for postgres
+  ansible.builtin.template:
+    src: "container-postgres.service.j2"
+    dest: "/etc/systemd/system/container-postgres.service"
+    owner: root
+    group: root
+    mode: '0644'
+  register: systemd_units_deployed
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: systemd_units_deployed is changed
+
+- name: Enable and start container services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - "container-opa-ot.service"
+    - "container-opa-compliance.service"
+    - "container-opa-security.service"
+    - "container-postgres.service"

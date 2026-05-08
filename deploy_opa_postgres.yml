@@ -1,0 +1,7 @@
+---
+- name: Deploy OPA and PostgreSQL for Compliance Assessment
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - deploy_opa_postgres
