@@ -5,6 +5,18 @@
       - podman
     state: present
 
+- name: Create necessary directories for OPA
+  ansible.builtin.file:
+    path: /etc/opa/{{ item }}
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+  loop:
+    - ot
+    - compliance
+    - security
+
 - name: Login to Red Hat Container Registry
   containers.podman.podman_login:
     registry: registry.redhat.io
