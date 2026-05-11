@@ -62,8 +62,8 @@
 
 - name: Deploy container systemd unit files for postgres
   ansible.builtin.template:
-    src: "container-postgres.service.j2"
-    dest: "/etc/systemd/system/container-postgres.service"
+    src: "container-postgresql.service.j2"
+    dest: "/etc/systemd/system/container-postgresql.service"
     owner: root
     group: root
     mode: '0644'
