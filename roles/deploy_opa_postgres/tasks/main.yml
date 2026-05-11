@@ -81,4 +81,4 @@
     - "container-opa-ot.service"
     - "container-opa-compliance.service"
     - "container-opa-security.service"
-    - "container-postgres.service"
+    - "container-postgresql.service"
