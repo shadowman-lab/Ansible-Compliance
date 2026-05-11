@@ -58,7 +58,6 @@
     - "container-opa-ot.service"
     - "container-opa-compliance.service"
     - "container-opa-security.service"
-    - "container-postgres.service"
   notify: Reload systemd daemon
 
 - name: Deploy container systemd unit files for postgres
