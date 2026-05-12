@@ -79,11 +79,11 @@
         login_db: "{{ pg_db }}"
         query: >
           INSERT INTO compliance_results
-            (framework, hostname, compliant, compliance_percentage, total_controls, passing_controls,
-              violations, details, policy_version, trigger, captured_at)
+            (framework, hostname, compliant, compliance_percentage, total_controls, passed_controls,
+              violations, details, policy_version, captured_at)
           VALUES
             ('cip_010_baseline', %s, true, 100.0, 0, 0, '[]'::jsonb,
-              %s::jsonb, 'CIP-010 R1.1', %s, NOW())
+              %s::jsonb, 'CIP-010 R1.1', NOW())
         positional_args:
           - "{{ inventory_hostname }}"
           - "{{ current_baseline | to_json }}"
@@ -164,12 +164,12 @@
         login_db: "{{ pg_db }}"
         query: >
           INSERT INTO compliance_results
-            (framework, hostname, compliant, compliance_percentage, total_controls, passing_controls,
-              violations, details, policy_version, trigger, captured_at)
+            (framework, hostname, compliant, compliance_percentage, total_controls, passed_controls,
+              violations, details, policy_version, captured_at)
           VALUES
             ('cip_010_check', %s, %s::boolean,
               %s::numeric, 5, %s::integer,
-              %s::jsonb, %s::jsonb, 'CIP-010 R1.2', %s, NOW())
+              %s::jsonb, %s::jsonb, 'CIP-010 R1.2', NOW())
         positional_args:
           - "{{ inventory_hostname }}"
           - "{{ 'false' if has_deviations else 'true' }}"
@@ -177,7 +177,6 @@
           - "{{ 5 - ([packages_added | length, packages_removed | length, services_added | length, services_removed | length, ports_added | length] | select('gt', 0) | list | length) }}"
           - "{{ deviations | to_json }}"
           - "{{ {'current': current_baseline, 'baseline': stored, 'deviations': deviations} | to_json }}"
-          - "{{ change_ticket if change_ticket else compliance_trigger | default('scheduled_check') }}"
       delegate_to: localhost
 
     - name: Fail if unauthorized deviations detected
