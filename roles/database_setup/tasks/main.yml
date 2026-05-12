@@ -29,6 +29,8 @@
         compliant             BOOLEAN,
         violations            JSONB,
         metadata              JSONB,
+        details               JSONB,
+        captured_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         evaluation_timestamp  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         facts_id              INTEGER
       )
