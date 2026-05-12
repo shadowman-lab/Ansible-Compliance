@@ -12,7 +12,7 @@ compliant if {
 }
 
 # Aggregate all violations across sections
-all_violations := [v |
+violations := [v |
 	arrays := [
 		initial_setup_violations,
 		services_violations,
@@ -25,6 +25,8 @@ all_violations := [v |
 	]
 	v := arrays[_][_]
 ]
+
+all_violations := violations
 
 # Section 1: Initial Setup (Enhanced for RHEL 10)
 initial_setup_violations := [
