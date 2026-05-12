@@ -53,6 +53,7 @@
 
 - name: Build OPA input payload
   ansible.builtin.set_fact:
+    policy_package: "cis_rhel{{ ansible_distribution_major_version }}"
     opa_input:
       ansible_facts:
         ansible_hostname: "{{ ansible_hostname }}"
