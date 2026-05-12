@@ -1,4 +1,4 @@
-package cis.rhel_10
+package cis_rhel10
 
 # CIS Red Hat Enterprise Linux 10 Benchmark v1.0.0 (Draft)
 # Center for Internet Security (CIS) Red Hat Enterprise Linux 10 Benchmark
@@ -12,7 +12,7 @@ compliant if {
 }
 
 # Aggregate all violations across sections
-violations := [v |
+all_violations := [v |
 	arrays := [
 		initial_setup_violations,
 		services_violations,
