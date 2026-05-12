@@ -49,11 +49,11 @@
 
 - name: Retrieve stored baseline from PostgreSQL
   community.postgresql.postgresql_query:
-    login_host: "{{ aac_result_pg_host }}"
-    login_port: "{{ aac_result_pg_port }}"
-    login_user: "{{ aac_result_pg_user }}"
-    login_password: "{{ aac_result_pg_password }}"
-    login_db: "{{ aac_result_pg_db }}"
+    login_host: "{{ pg_host }}"
+    login_port: "{{ pg_port }}"
+    login_user: "{{ pg_user }}"
+    login_password: "{{ pg_password }}"
+    login_db: "{{ pg_db }}"
     query: >
       SELECT details, captured_at
       FROM compliance_results
@@ -71,11 +71,11 @@
 
     - name: Store baseline to PostgreSQL
       community.postgresql.postgresql_query:
-        login_host: "{{ aac_result_pg_host }}"
-        login_port: "{{ aac_result_pg_port }}"
-        login_user: "{{ aac_result_pg_user }}"
-        login_password: "{{ aac_result_pg_password }}"
-        login_db: "{{ aac_result_pg_db }}"
+        login_host: "{{ pg_host }}"
+        login_port: "{{ pg_port }}"
+        login_user: "{{ pg_user }}"
+        login_password: "{{ pg_password }}"
+        login_db: "{{ pg_db }}"
         query: >
           INSERT INTO compliance_results
             (framework, host, compliant, score, total_controls, passing_controls,
@@ -155,11 +155,11 @@
 
     - name: Store deviation check to PostgreSQL
       community.postgresql.postgresql_query:
-        login_host: "{{ aac_result_pg_host }}"
-        login_port: "{{ aac_result_pg_port }}"
-        login_user: "{{ aac_result_pg_user }}"
-        login_password: "{{ aac_result_pg_password }}"
-        login_db: "{{ aac_result_pg_db }}"
+        login_host: "{{ pg_host }}"
+        login_port: "{{ pg_port }}"
+        login_user: "{{ pg_user }}"
+        login_password: "{{ pg_password }}"
+        login_db: "{{ pg_db }}"
         query: >
           INSERT INTO compliance_results
             (framework, host, compliant, score, total_controls, passing_controls,
