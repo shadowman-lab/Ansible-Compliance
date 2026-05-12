@@ -87,7 +87,6 @@
         positional_args:
           - "{{ inventory_hostname }}"
           - "{{ current_baseline | to_json }}"
-          - "{{ change_ticket if change_ticket else 'initial_capture' }}"
       delegate_to: localhost
 
     - name: Baseline captured
