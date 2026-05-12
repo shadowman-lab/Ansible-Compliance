@@ -63,6 +63,7 @@
       LIMIT 1
     positional_args:
       - "{{ inventory_hostname }}"
+  delegate_to: localhost
   register: stored_baseline
 
 - name: Capture mode — store new baseline
@@ -87,6 +88,7 @@
           - "{{ inventory_hostname }}"
           - "{{ current_baseline | to_json }}"
           - "{{ change_ticket if change_ticket else 'initial_capture' }}"
+      delegate_to: localhost
 
     - name: Baseline captured
       ansible.builtin.debug:
@@ -176,6 +178,7 @@
           - "{{ deviations | to_json }}"
           - "{{ {'current': current_baseline, 'baseline': stored, 'deviations': deviations} | to_json }}"
           - "{{ change_ticket if change_ticket else compliance_trigger | default('scheduled_check') }}"
+      delegate_to: localhost
 
     - name: Fail if unauthorized deviations detected
       ansible.builtin.fail:
