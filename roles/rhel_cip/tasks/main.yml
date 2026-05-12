@@ -79,7 +79,7 @@
         login_db: "{{ pg_db }}"
         query: >
           INSERT INTO compliance_results
-            (framework, hostname, compliant, score, total_controls, passing_controls,
+            (framework, hostname, compliant, compliance_percentage, total_controls, passing_controls,
               violations, details, policy_version, trigger, captured_at)
           VALUES
             ('cip_010_baseline', %s, true, 100.0, 0, 0, '[]'::jsonb,
@@ -164,7 +164,7 @@
         login_db: "{{ pg_db }}"
         query: >
           INSERT INTO compliance_results
-            (framework, hostname, compliant, score, total_controls, passing_controls,
+            (framework, hostname, compliant, compliance_percentage, total_controls, passing_controls,
               violations, details, policy_version, trigger, captured_at)
           VALUES
             ('cip_010_check', %s, %s::boolean,
