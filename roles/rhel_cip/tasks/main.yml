@@ -62,7 +62,7 @@
       ORDER BY captured_at DESC
       LIMIT 1
     positional_args:
-      - "{{ target_host }}"
+      - "{{ inventory_hostname }}"
   register: stored_baseline
 
 - name: Capture mode — store new baseline
@@ -84,14 +84,14 @@
             ('cip_010_baseline', %s, true, 100.0, 0, 0, '[]'::jsonb,
               %s::jsonb, 'CIP-010 R1.1', %s, NOW())
         positional_args:
-          - "{{ target_host }}"
+          - "{{ inventory_hostname }}"
           - "{{ current_baseline | to_json }}"
           - "{{ change_ticket if change_ticket else 'initial_capture' }}"
 
     - name: Baseline captured
       ansible.builtin.debug:
         msg: |
-          ✅ CIP-010 R1.1 Baseline captured for {{ target_host }}
+          ✅ CIP-010 R1.1 Baseline captured for {{ inventory_hostname }}
           Timestamp : {{ assessment_timestamp }}
           Packages  : {{ current_baseline.installed_packages | length }}
           Services  : {{ current_baseline.running_services | length }}
@@ -136,7 +136,7 @@
           ║        CIP-010 R1 BASELINE DEVIATION REPORT          ║
           ╚══════════════════════════════════════════════════════╝
 
-          Host          : {{ target_host }}
+          Host          : {{ inventory_hostname }}
           Baseline Date : {{ stored_baseline.query_result[0].captured_at }}
           Check Date    : {{ assessment_timestamp }}
 
@@ -169,7 +169,7 @@
               %s::numeric, 5, %s::integer,
               %s::jsonb, %s::jsonb, 'CIP-010 R1.2', %s, NOW())
         positional_args:
-          - "{{ target_host }}"
+          - "{{ inventory_hostname }}"
           - "{{ 'false' if has_deviations else 'true' }}"
           - "{{ 0 if has_deviations else 100 }}"
           - "{{ 5 - ([packages_added | length, packages_removed | length, services_added | length, services_removed | length, ports_added | length] | select('gt', 0) | list | length) }}"
@@ -180,7 +180,7 @@
     - name: Fail if unauthorized deviations detected
       ansible.builtin.fail:
         msg: >
-          CIP-010 R1.2 VIOLATION: Configuration deviations detected on {{ target_host }}
+          CIP-010 R1.2 VIOLATION: Configuration deviations detected on {{ inventory_hostname }}
           with no authorized change ticket. Review deviations above and obtain
           change authorization before the 30-day CIP-010 R1.3 deadline.
       when: has_deviations and not change_ticket
