@@ -125,7 +125,7 @@
   ansible.builtin.debug:
     msg: |
       ========================================
-      CIS RHEL 9 Compliance Assessment Results
+      CIS RHEL Compliance Assessment Results
       ========================================
       Hostname: {{ inventory_hostname }}
       IP Address: {{ ansible_default_ipv4.address | default('unknown') }}
