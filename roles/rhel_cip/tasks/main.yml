@@ -1,0 +1,186 @@
+- name: Collect baseline facts from BES Cyber System
+  ansible.builtin.setup:
+    gather_subset:
+      - hardware
+      - network
+      - virtual
+  register: collected_facts
+
+- name: Collect installed packages
+  ansible.builtin.shell: rpm -qa --queryformat '%{NAME}|%{VERSION}|%{RELEASE}\n' | sort
+  register: installed_packages
+  changed_when: false
+
+- name: Collect running services
+  ansible.builtin.shell: systemctl list-units --type=service --state=running --no-legend | awk '{print $1}'
+  register: running_services
+  changed_when: false
+
+- name: Collect listening ports
+  ansible.builtin.shell: ss -tlnp | awk 'NR>1 {print $4}' | sort -u
+  register: listening_ports
+  changed_when: false
+
+- name: Collect applied security patches
+  ansible.builtin.shell: rpm -qa --queryformat '%{NAME}|%{VERSION}\n' | grep -i 'security\|patch\|errata' | sort
+  register: security_patches
+  changed_when: false
+
+- name: Collect network interfaces and IPs
+  ansible.builtin.shell: ip -o addr show | awk '{print $2, $4}' | sort
+  register: network_interfaces
+  changed_when: false
+
+- name: Build baseline snapshot
+  ansible.builtin.set_fact:
+    current_baseline:
+      host: "{{ inventory_hostname }}"
+      captured_at: "{{ assessment_timestamp }}"
+      os_info:
+        distribution: "{{ hostvars[inventory_hostname].ansible_distribution | default('unknown') }}"
+        version: "{{ hostvars[inventory_hostname].ansible_distribution_version | default('unknown') }}"
+        kernel: "{{ hostvars[inventory_hostname].ansible_kernel | default('unknown') }}"
+      installed_packages: "{{ installed_packages.stdout_lines | default([]) }}"
+      running_services: "{{ running_services.stdout_lines | default([]) }}"
+      listening_ports: "{{ listening_ports.stdout_lines | default([]) }}"
+      security_patches: "{{ security_patches.stdout_lines | default([]) }}"
+      network_interfaces: "{{ network_interfaces.stdout_lines | default([]) }}"
+      authorized_change_ticket: "{{ change_ticket }}"
+
+- name: Retrieve stored baseline from PostgreSQL
+  community.postgresql.postgresql_query:
+    login_host: "{{ aac_result_pg_host }}"
+    login_port: "{{ aac_result_pg_port }}"
+    login_user: "{{ aac_result_pg_user }}"
+    login_password: "{{ aac_result_pg_password }}"
+    login_db: "{{ aac_result_pg_db }}"
+    query: >
+      SELECT details, captured_at
+      FROM compliance_results
+      WHERE framework = 'cip_010_baseline'
+        AND host = %s
+      ORDER BY captured_at DESC
+      LIMIT 1
+    positional_args:
+      - "{{ target_host }}"
+  register: stored_baseline
+
+- name: Capture mode — store new baseline
+  when: baseline_mode == 'capture' or stored_baseline.query_result | length == 0
+  block:
+
+    - name: Store baseline to PostgreSQL
+      community.postgresql.postgresql_query:
+        login_host: "{{ aac_result_pg_host }}"
+        login_port: "{{ aac_result_pg_port }}"
+        login_user: "{{ aac_result_pg_user }}"
+        login_password: "{{ aac_result_pg_password }}"
+        login_db: "{{ aac_result_pg_db }}"
+        query: >
+          INSERT INTO compliance_results
+            (framework, host, compliant, score, total_controls, passing_controls,
+              violations, details, policy_version, trigger, captured_at)
+          VALUES
+            ('cip_010_baseline', %s, true, 100.0, 0, 0, '[]'::jsonb,
+              %s::jsonb, 'CIP-010 R1.1', %s, NOW())
+        positional_args:
+          - "{{ target_host }}"
+          - "{{ current_baseline | to_json }}"
+          - "{{ change_ticket if change_ticket else 'initial_capture' }}"
+
+    - name: Baseline captured
+      ansible.builtin.debug:
+        msg: |
+          ✅ CIP-010 R1.1 Baseline captured for {{ target_host }}
+          Timestamp : {{ assessment_timestamp }}
+          Packages  : {{ current_baseline.installed_packages | length }}
+          Services  : {{ current_baseline.running_services | length }}
+          Ports     : {{ current_baseline.listening_ports | length }}
+          Stored to PostgreSQL for audit evidence.
+
+- name: Check mode — diff against stored baseline
+  when: baseline_mode == 'check' and stored_baseline.query_result | length > 0
+  block:
+
+    - name: Parse stored baseline
+      ansible.builtin.set_fact:
+        stored: "{{ stored_baseline.query_result[0].details }}"
+
+    - name: Compute package deviations
+      ansible.builtin.set_fact:
+        packages_added: "{{ current_baseline.installed_packages | difference(stored.installed_packages | default([])) }}"
+        packages_removed: "{{ stored.installed_packages | default([]) | difference(current_baseline.installed_packages) }}"
+        services_added: "{{ current_baseline.running_services | difference(stored.running_services | default([])) }}"
+        services_removed: "{{ stored.running_services | default([]) | difference(current_baseline.running_services) }}"
+        ports_added: "{{ current_baseline.listening_ports | difference(stored.listening_ports | default([])) }}"
+        ports_removed: "{{ stored.listening_ports | default([]) | difference(current_baseline.listening_ports) }}"
+
+    - name: Build deviation report
+      ansible.builtin.set_fact:
+        deviations:
+          packages_added: "{{ packages_added }}"
+          packages_removed: "{{ packages_removed }}"
+          services_added: "{{ services_added }}"
+          services_removed: "{{ services_removed }}"
+          ports_added: "{{ ports_added }}"
+          ports_removed: "{{ ports_removed }}"
+        has_deviations: >-
+          {{ (packages_added | length > 0) or (packages_removed | length > 0) or
+              (services_added | length > 0) or (services_removed | length > 0) or
+              (ports_added | length > 0) or (ports_removed | length > 0) }}
+
+    - name: Print deviation report
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════╗
+          ║        CIP-010 R1 BASELINE DEVIATION REPORT          ║
+          ╚══════════════════════════════════════════════════════╝
+
+          Host          : {{ target_host }}
+          Baseline Date : {{ stored_baseline.query_result[0].captured_at }}
+          Check Date    : {{ assessment_timestamp }}
+
+          {% if has_deviations %}
+          ⚠️  DEVIATIONS DETECTED — CIP-010 R1.2 Authorization Required
+          {% else %}
+          ✅  No deviations from approved baseline
+          {% endif %}
+
+          Packages Added   ({{ packages_added | length }}): {{ packages_added | join(', ') if packages_added else 'none' }}
+          Packages Removed ({{ packages_removed | length }}): {{ packages_removed | join(', ') if packages_removed else 'none' }}
+          Services Added   ({{ services_added | length }}): {{ services_added | join(', ') if services_added else 'none' }}
+          Services Removed ({{ services_removed | length }}): {{ services_removed | join(', ') if services_removed else 'none' }}
+          Ports Added      ({{ ports_added | length }}): {{ ports_added | join(', ') if ports_added else 'none' }}
+          Ports Removed    ({{ ports_removed | length }}): {{ ports_removed | join(', ') if ports_removed else 'none' }}
+
+    - name: Store deviation check to PostgreSQL
+      community.postgresql.postgresql_query:
+        login_host: "{{ aac_result_pg_host }}"
+        login_port: "{{ aac_result_pg_port }}"
+        login_user: "{{ aac_result_pg_user }}"
+        login_password: "{{ aac_result_pg_password }}"
+        login_db: "{{ aac_result_pg_db }}"
+        query: >
+          INSERT INTO compliance_results
+            (framework, host, compliant, score, total_controls, passing_controls,
+              violations, details, policy_version, trigger, captured_at)
+          VALUES
+            ('cip_010_check', %s, %s::boolean,
+              %s::numeric, 5, %s::integer,
+              %s::jsonb, %s::jsonb, 'CIP-010 R1.2', %s, NOW())
+        positional_args:
+          - "{{ target_host }}"
+          - "{{ 'false' if has_deviations else 'true' }}"
+          - "{{ 0 if has_deviations else 100 }}"
+          - "{{ 5 - ([packages_added | length, packages_removed | length, services_added | length, services_removed | length, ports_added | length] | select('gt', 0) | list | length) }}"
+          - "{{ deviations | to_json }}"
+          - "{{ {'current': current_baseline, 'baseline': stored, 'deviations': deviations} | to_json }}"
+          - "{{ change_ticket if change_ticket else compliance_trigger | default('scheduled_check') }}"
+
+    - name: Fail if unauthorized deviations detected
+      ansible.builtin.fail:
+        msg: >
+          CIP-010 R1.2 VIOLATION: Configuration deviations detected on {{ target_host }}
+          with no authorized change ticket. Review deviations above and obtain
+          change authorization before the 30-day CIP-010 R1.3 deadline.
+      when: has_deviations and not change_ticket

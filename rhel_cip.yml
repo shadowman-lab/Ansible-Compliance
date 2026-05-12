@@ -1,0 +1,16 @@
+---
+# Simple CIS RHEL 9 Compliance Assessment using OPA
+# Collects facts and validates against CIS RHEL 9 benchmark
+
+- name: CIS RHEL 9 Compliance Assessment
+  hosts: all
+  gather_facts: false
+  become: true
+
+  roles:
+    - role: rhel_cip
+      vars:
+        baseline_mode: "{{ baseline_mode | default('check') }}"
+        change_ticket: "{{ authorized_change_ticket | default('') }}"
+        assessment_timestamp: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+        assessment_date: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
